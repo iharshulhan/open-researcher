@@ -1,10 +1,11 @@
 import FirecrawlApp from '@mendable/firecrawl-js';
 import { AIClientFactory } from './ai-client-factory';
+import { AIClient, AIToolDefinition, AIClientMessage } from './ai-client-interface';
 
 // Lazy initialization for Vercel deployment
 let firecrawl: FirecrawlApp | null = null;
 
-function getAIClient() {
+function getAIClient(): AIClient {
   return AIClientFactory.getClient();
 }
 

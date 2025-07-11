@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { performResearchWithStreaming } from '@/lib/open-researcher-agent'
+import { AIClientFactory } from '@/lib/ai-client-factory'
 
 export async function POST(req: NextRequest) {
   try {
@@ -9,15 +10,25 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Query is required' }, { status: 400 })
     }
 
-    // Check for Anthropic API key in environment
-    if (!process.env.ANTHROPIC_API_KEY) {
-      // ANTHROPIC_API_KEY is not configured in environment variables
+    // Check for available AI providers
+    const availableProviders = AIClientFactory.getAvailableProviders();
+    const availableAI = availableProviders.filter(provider => provider.available);
+
+    if (availableAI.length === 0) {
+      // No AI provider is configured
       return NextResponse.json(
-        { error: 'ANTHROPIC_API_KEY is not configured. Please add it to your Vercel environment variables.' },
+        { 
+          error: 'No AI provider is configured. Please set either ANTHROPIC_API_KEY or Azure OpenAI environment variables (AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_KEY, AZURE_OPENAI_DEPLOYMENT_NAME).',
+          availableProviders
+        },
         { status: 500 }
       )
     }
 
+    // Get current provider info for logging
+    const currentProvider = AIClientFactory.getCurrentProvider();
+    console.log('Using AI provider:', currentProvider?.name || 'Unknown');
+    
     // Get Firecrawl API key from headers first, then fall back to environment variables
     const firecrawlApiKey = req.headers.get('X-Firecrawl-API-Key') || process.env.FIRECRAWL_API_KEY
 
@@ -69,11 +80,13 @@ export async function POST(req: NextRequest) {
           // More user-friendly error messages
           let userFriendlyError = errorMessage
           if (errorMessage.includes('Model error')) {
-            userFriendlyError = 'The Anthropic claude-opus-4 model is not available. This might be due to regional restrictions or API tier limitations.'
+            userFriendlyError = 'The AI model is not available. This might be due to regional restrictions or API tier limitations.'
           } else if (errorMessage.includes('Beta feature error')) {
-            userFriendlyError = 'The interleaved thinking feature is not enabled for your Anthropic API key. This is a beta feature that may require special access.'
+            userFriendlyError = 'Advanced thinking features are not enabled for your AI provider. This may require special access.'
           } else if (errorMessage.includes('Authentication error')) {
-            userFriendlyError = 'Invalid Anthropic API key. Please check your environment variables in Vercel.'
+            userFriendlyError = 'Authentication failed. Please check your AI provider API keys in environment variables.'
+          } else if (errorMessage.includes('Azure OpenAI')) {
+            userFriendlyError = errorMessage // Azure errors are already user-friendly
           }
           
           const errorData = `data: ${JSON.stringify({ 
