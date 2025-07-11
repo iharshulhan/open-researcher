@@ -1,11 +1,12 @@
 import FirecrawlApp from '@mendable/firecrawl-js';
-import { getAnthropicCompatibleClient } from './ai-client-adapter';
+import { AIClientFactory } from './ai-client-factory';
+import { AIClient } from './ai-client-interface';
 
 // Lazy initialization for Vercel deployment  
 let firecrawl: FirecrawlApp | null = null;
 
-function getAnthropicClient() {
-  return getAnthropicCompatibleClient();
+function getAIClient(): AIClient {
+  return AIClientFactory.getClient();
 }
 
 function getFirecrawlClient(): FirecrawlApp {
@@ -191,7 +192,8 @@ async function executeWebSearch(query: string, limit: number = 5, scrapeContent:
     let output = `Found ${metadataResults.data.length} results:\n\n`;
     
     // Display all results with metadata
-    for (const [index, result] of metadataResults.data.entries()) {
+    for (let index = 0; index < metadataResults.data.length; index++) {
+      const result = metadataResults.data[index];
       output += `[${index + 1}] ${result.title}\n`;
       output += `URL: ${result.url}\n`;
       output += `Description: ${result.description}\n`;
@@ -281,7 +283,8 @@ async function executeWebSearch(query: string, limit: number = 5, scrapeContent:
         // Process scraped results
         const scrapedWithMetadata = [];
         
-        for (const [index, result] of (scrapedResults.data || []).entries()) {
+        for (let index = 0; index < (scrapedResults.data || []).length; index++) {
+          const result = (scrapedResults.data || [])[index];
           // Only include scraped content for our selected URLs
           if (result.url && urlsToScrape.includes(result.url) && result.markdown) {
             // Store screenshot if available
@@ -586,7 +589,8 @@ async function executeDeepScrape(
     
     output += `\nSuccessfully scraped ${successfulScrapes.length} pages:\n\n`;
     
-    for (const [index, result] of successfulScrapes.entries()) {
+    for (let index = 0; index < successfulScrapes.length; index++) {
+      const result = successfulScrapes[index];
       if (result) {
         output += `[${index + 1}] ${result.title}\n`;
         output += `URL: ${result.url}\n`;
@@ -670,8 +674,11 @@ export async function performResearchWithStreaming(
 
 Be thorough and methodical. Always verify you have the correct post by its position in the blog listing.`;
 
+  // Get the AI client
+  const aiClient = getAIClient();
+  
   const requestParams = {
-    model: "claude-opus-4-20250514",
+    model: aiClient.getDefaultModel(),
     max_tokens: 8000,
     system: systemPrompt,
     thinking: {
@@ -682,22 +689,61 @@ Be thorough and methodical. Always verify you have the correct post by its posit
     messages: messages
   };
 
+  // Check if this is Anthropic with advanced features
+  const isAnthropicWithAdvancedFeatures = aiClient.getProviderName().includes('Anthropic');
+
+  try {
+    if (isAnthropicWithAdvancedFeatures) {
+      // Use Anthropic's advanced interleaved thinking features
+      return await performAnthropicStreamingResearch(requestParams, onEvent);
+    } else {
+      // Use simplified approach for other providers (Azure OpenAI)
+      return await performSimpleStreamingResearch(aiClient, requestParams, onEvent);
+    }
+  } catch (error) {
+    // Enhanced error handling for different providers
+    if (error instanceof Error) {
+      // Provider-specific error handling
+      if (error.message.includes('Model error') || error.message.includes('model')) {
+        throw new Error(`Model error: The AI model may not be available. Error: ${error.message}`);
+      }
+      if (error.message.includes('Beta feature error') || error.message.includes('beta')) {
+        throw new Error(`Feature error: Advanced features may not be available with this provider. Error: ${error.message}`);
+      }
+      if (error.message.includes('Authentication error') || error.message.includes('authentication') || error.message.includes('401')) {
+        throw new Error(`Authentication error: Please check your AI provider API keys. Error: ${error.message}`);
+      }
+      if (error.message.includes('Azure OpenAI')) {
+        // Azure errors are already user-friendly
+        throw error;
+      }
+    }
+    throw error;
+  }
+}
+
+// Anthropic streaming research with advanced features
+async function performAnthropicStreamingResearch(
+  requestParams: any,
+  onEvent: (event: { type: string; [key: string]: unknown }) => void
+): Promise<string> {
+  // Import Anthropic dynamically to avoid issues when not configured
+  const Anthropic = (await import('@anthropic-ai/sdk')).default;
+  
+  // Get the Anthropic client
+  const anthropicClient = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! });
+
   // Create request with interleaved thinking
   let response;
   try {
-    // Creating Anthropic message with interleaved thinking
-    
-    response = await getAnthropicClient().beta.messages.create({
+    response = await anthropicClient.beta.messages.create({
       ...requestParams,
       betas: ["interleaved-thinking-2025-05-14"]
-    } as Parameters<Anthropic['beta']['messages']['create']>[0]);
+    });
   } catch (error) {
-    // Failed to create message with beta API
-    
     if (error instanceof Error) {
-      // Check for specific error types
       if (error.message.includes('model')) {
-        throw new Error(`Model error: The claude-opus-4-20250514 model may not be available in your region or with your API key. Error: ${error.message}`);
+        throw new Error(`Model error: The ${requestParams.model} model may not be available in your region or with your API key. Error: ${error.message}`);
       }
       if (error.message.includes('beta')) {
         throw new Error(`Beta feature error: The interleaved-thinking-2025-05-14 beta may not be enabled for your account. Error: ${error.message}`);
@@ -705,8 +751,6 @@ Be thorough and methodical. Always verify you have the correct post by its posit
       if (error.message.includes('authentication') || error.message.includes('401')) {
         throw new Error(`Authentication error: Please check your ANTHROPIC_API_KEY. Error: ${error.message}`);
       }
-      // Include full error details for debugging
-      // Error details logged internally
     }
     throw error;
   }
@@ -715,7 +759,7 @@ Be thorough and methodical. Always verify you have the correct post by its posit
   const assistantContent: Array<{ type: string; [key: string]: unknown }> = [];
   let thinkingCount = 0;
   let toolCallCount = 0;
-  let currentMessages = [...messages];
+  let currentMessages = [...requestParams.messages];
   let finalResponse = '';
 
   // Process response recursively
@@ -738,7 +782,6 @@ Be thorough and methodical. Always verify you have the correct post by its posit
         const toolDisplayName = block.name === 'web_search' ? 'firecrawl_search' : 
                                  block.name === 'deep_scrape' ? 'firecrawl_scrape' : 
                                  block.name;
-        // Executing tool
         
         // Send tool call event
         onEvent({
@@ -754,8 +797,6 @@ Be thorough and methodical. Always verify you have the correct post by its posit
         const startTime = Date.now();
         const toolResult = await executeTool(block.name || '', block.input || {});
         const duration = Date.now() - startTime;
-        
-        // Tool execution completed
         
         // Send tool result event with screenshots if available
         onEvent({
@@ -791,12 +832,11 @@ Be thorough and methodical. Always verify you have the correct post by its posit
 
         let nextResponse;
         try {
-          nextResponse = await getAnthropicClient().beta.messages.create({
+          nextResponse = await anthropicClient.beta.messages.create({
             ...continuationParams,
             betas: ["interleaved-thinking-2025-05-14"]
-          } as Parameters<Anthropic['beta']['messages']['create']>[0]);
+          });
         } catch (error) {
-          // Failed to continue conversation with beta API
           throw error;
         }
 
@@ -808,7 +848,6 @@ Be thorough and methodical. Always verify you have the correct post by its posit
         return;
       } else if (block.type === 'text') {
         const textContent = block.text || '';
-        // Processing response
         
         // Send final response event
         onEvent({
@@ -823,13 +862,121 @@ Be thorough and methodical. Always verify you have the correct post by its posit
 
   await processResponse(response as { content: Array<{ type: string; thinking?: string; text?: string; name?: string; input?: Record<string, unknown>; id?: string }> });
 
-  // Research completed
-  
   // Send summary event
   onEvent({
     type: 'summary',
     thinkingBlocks: thinkingCount,
-    toolCalls: toolCallCount
+    toolCalls: toolCallCount,
+    provider: 'Anthropic Claude'
+  });
+  
+  return finalResponse;
+}
+
+// Simple streaming research for Azure OpenAI and other providers
+async function performSimpleStreamingResearch(
+  aiClient: AIClient,
+  requestParams: any,
+  onEvent: (event: { type: string; [key: string]: unknown }) => void
+): Promise<string> {
+  // Emit a thinking event to show Azure OpenAI is processing
+  onEvent({
+    type: 'thinking',
+    number: 1,
+    content: `${aiClient.getProviderName()} is processing your request...`
+  });
+
+  // Track conversation state for multi-turn tool usage
+  let currentMessages = [...requestParams.messages];
+  let toolCallCount = 0;
+  let finalResponse = '';
+  let maxIterations = 10; // Prevent infinite loops
+  let iteration = 0;
+
+  while (iteration < maxIterations) {
+    iteration++;
+    
+    const response = await aiClient.createMessage({
+      ...requestParams,
+      messages: currentMessages
+    });
+    
+    let hasToolCalls = false;
+    let responseText = '';
+
+    // Process response blocks
+    for (const block of response.content) {
+      if (block.type === 'tool_use') {
+        hasToolCalls = true;
+        toolCallCount++;
+        
+        const toolDisplayName = block.name === 'web_search' ? 'firecrawl_search' : 
+                                 block.name === 'deep_scrape' ? 'firecrawl_scrape' : 
+                                 block.name;
+        
+        // Send tool call event
+        onEvent({
+          type: 'tool_call',
+          number: toolCallCount,
+          tool: toolDisplayName,
+          parameters: block.input
+        });
+
+        // Execute the tool
+        const startTime = Date.now();
+        const toolResult = await executeTool(block.name || '', block.input || {});
+        const duration = Date.now() - startTime;
+        
+        // Send tool result event with screenshots if available
+        onEvent({
+          type: 'tool_result',
+          tool: block.name || '',
+          duration,
+          result: toolResult.content,
+          screenshots: toolResult.screenshots
+        });
+
+        // Update messages for next iteration
+        currentMessages = [
+          ...currentMessages,
+          {
+            role: "assistant",
+            content: response.content
+          },
+          {
+            role: "user",
+            content: [{
+              type: "tool_result",
+              tool_use_id: block.id,
+              content: toolResult.content
+            }]
+          }
+        ];
+      } else if (block.type === 'text') {
+        responseText = block.text || '';
+      }
+    }
+
+    // If no tool calls, we're done
+    if (!hasToolCalls) {
+      finalResponse = responseText;
+      break;
+    }
+  }
+
+  // Send final response event
+  if (finalResponse) {
+    onEvent({
+      type: 'response',
+      content: finalResponse
+    });
+  }
+
+  // Send summary event
+  onEvent({
+    type: 'summary',
+    toolCalls: toolCallCount,
+    provider: aiClient.getProviderName()
   });
   
   return finalResponse;
@@ -862,8 +1009,11 @@ export async function performResearch(query: string): Promise<string> {
 
 Be thorough and methodical. Always verify you have the correct post by its position in the blog listing.`;
 
+  // Get the AI client
+  const aiClient = getAIClient();
+  
   const requestParams = {
-    model: "claude-opus-4-20250514",
+    model: aiClient.getDefaultModel(),
     max_tokens: 8000,
     system: systemPrompt,
     thinking: {
@@ -874,22 +1024,37 @@ Be thorough and methodical. Always verify you have the correct post by its posit
     messages: messages
   };
 
+  // Check if this is Anthropic with advanced features
+  const isAnthropicWithAdvancedFeatures = aiClient.getProviderName().includes('Anthropic');
+
+  if (isAnthropicWithAdvancedFeatures) {
+    // Use Anthropic's advanced features for non-streaming
+    return await performAnthropicResearch(requestParams);
+  } else {
+    // Use simplified approach for other providers
+    return await performSimpleResearch(aiClient, requestParams);
+  }
+}
+
+// Anthropic non-streaming research with advanced features
+async function performAnthropicResearch(requestParams: any): Promise<string> {
+  // Import Anthropic dynamically to avoid issues when not configured
+  const Anthropic = (await import('@anthropic-ai/sdk')).default;
+  
+  // Get the Anthropic client
+  const anthropicClient = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! });
+
   // Create request with interleaved thinking
   let response;
   try {
-    // Creating Anthropic message with interleaved thinking
-    
-    response = await getAnthropicClient().beta.messages.create({
+    response = await anthropicClient.beta.messages.create({
       ...requestParams,
       betas: ["interleaved-thinking-2025-05-14"]
-    } as Parameters<Anthropic['beta']['messages']['create']>[0]);
+    });
   } catch (error) {
-    // Failed to create message with beta API
-    
     if (error instanceof Error) {
-      // Check for specific error types
       if (error.message.includes('model')) {
-        throw new Error(`Model error: The claude-opus-4-20250514 model may not be available in your region or with your API key. Error: ${error.message}`);
+        throw new Error(`Model error: The ${requestParams.model} model may not be available in your region or with your API key. Error: ${error.message}`);
       }
       if (error.message.includes('beta')) {
         throw new Error(`Beta feature error: The interleaved-thinking-2025-05-14 beta may not be enabled for your account. Error: ${error.message}`);
@@ -897,8 +1062,6 @@ Be thorough and methodical. Always verify you have the correct post by its posit
       if (error.message.includes('authentication') || error.message.includes('401')) {
         throw new Error(`Authentication error: Please check your ANTHROPIC_API_KEY. Error: ${error.message}`);
       }
-      // Include full error details for debugging
-      // Error details logged internally
     }
     throw error;
   }
@@ -907,7 +1070,7 @@ Be thorough and methodical. Always verify you have the correct post by its posit
   const assistantContent: Array<{ type: string; [key: string]: unknown }> = [];
   let thinkingCount = 0;
   let toolCallCount = 0;
-  let currentMessages = [...messages];
+  let currentMessages = [...requestParams.messages];
   let finalResponse = '';
 
   // Process response recursively
@@ -919,18 +1082,12 @@ Be thorough and methodical. Always verify you have the correct post by its posit
         assistantContent.push(block);
       } else if (block.type === 'tool_use') {
         toolCallCount++;
-        const toolDisplayName = block.name === 'web_search' ? 'firecrawl_search' : 
-                                 block.name === 'deep_scrape' ? 'firecrawl_scrape' : 
-                                 block.name;
-        // Executing tool
         assistantContent.push(block);
 
         // Execute the tool
         const startTime = Date.now();
         const toolResult = await executeTool(block.name || '', block.input || {});
         const duration = Date.now() - startTime;
-        
-        // Tool execution completed
 
         // Update messages with tool result
         currentMessages = [
@@ -957,12 +1114,11 @@ Be thorough and methodical. Always verify you have the correct post by its posit
 
         let nextResponse;
         try {
-          nextResponse = await getAnthropicClient().beta.messages.create({
+          nextResponse = await anthropicClient.beta.messages.create({
             ...continuationParams,
             betas: ["interleaved-thinking-2025-05-14"]
-          } as Parameters<Anthropic['beta']['messages']['create']>[0]);
+          });
         } catch (error) {
-          // Failed to continue conversation with beta API
           throw error;
         }
 
@@ -974,15 +1130,73 @@ Be thorough and methodical. Always verify you have the correct post by its posit
         return;
       } else if (block.type === 'text') {
         const textContent = block.text || '';
-        // Processing response
         finalResponse = textContent;
       }
     }
   }
 
   await processResponse(response as { content: Array<{ type: string; thinking?: string; text?: string; name?: string; input?: Record<string, unknown>; id?: string }> });
+  
+  return finalResponse;
+}
 
-  // Research completed
+// Simple non-streaming research for Azure OpenAI and other providers
+async function performSimpleResearch(
+  aiClient: AIClient,
+  requestParams: any
+): Promise<string> {
+  // Track conversation state for multi-turn tool usage
+  let currentMessages = [...requestParams.messages];
+  let finalResponse = '';
+  let maxIterations = 10; // Prevent infinite loops
+  let iteration = 0;
+
+  while (iteration < maxIterations) {
+    iteration++;
+    
+    const response = await aiClient.createMessage({
+      ...requestParams,
+      messages: currentMessages
+    });
+    
+    let hasToolCalls = false;
+    let responseText = '';
+
+    // Process response blocks
+    for (const block of response.content) {
+      if (block.type === 'tool_use') {
+        hasToolCalls = true;
+
+        // Execute the tool
+        const toolResult = await executeTool(block.name || '', block.input || {});
+
+        // Update messages for next iteration
+        currentMessages = [
+          ...currentMessages,
+          {
+            role: "assistant",
+            content: response.content
+          },
+          {
+            role: "user",
+            content: [{
+              type: "tool_result",
+              tool_use_id: block.id,
+              content: toolResult.content
+            }]
+          }
+        ];
+      } else if (block.type === 'text') {
+        responseText = block.text || '';
+      }
+    }
+
+    // If no tool calls, we're done
+    if (!hasToolCalls) {
+      finalResponse = responseText;
+      break;
+    }
+  }
   
   return finalResponse;
 }
