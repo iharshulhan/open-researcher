@@ -222,6 +222,18 @@ export function ThinkingChat({ onMessagesChange, hasFirecrawlKey = false, onApiK
                       }
                     : msg
                 ))
+              } else if (data.type === 'error') {
+                // Handle SSE error events
+                const errorMessage = data.error || data.message || 'An unexpected error occurred during research.';
+                setMessages(prev => prev.map(msg => 
+                  msg.id === assistantMessage.id
+                    ? { 
+                        ...msg, 
+                        content: `❌ ${errorMessage}`,
+                        searchData: { status: 'error', events: events }
+                      }
+                    : msg
+                ))
               }
             } catch (e) {
               // Error parsing SSE data
