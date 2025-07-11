@@ -1,11 +1,11 @@
 import FirecrawlApp from '@mendable/firecrawl-js';
-import { AIClientFactory } from './ai-client-factory';
+import { getAnthropicCompatibleClient } from './ai-client-adapter';
 
-// Lazy initialization for Vercel deployment
+// Lazy initialization for Vercel deployment  
 let firecrawl: FirecrawlApp | null = null;
 
-function getAIClient() {
-  return AIClientFactory.getClient();
+function getAnthropicClient() {
+  return getAnthropicCompatibleClient();
 }
 
 function getFirecrawlClient(): FirecrawlApp {
@@ -21,8 +21,16 @@ function getFirecrawlClient(): FirecrawlApp {
   return firecrawl;
 }
 
-// Type definitions - keeping existing interfaces for backward compatibility
-interface ToolDefinition extends AIToolDefinition {}
+// Type definitions - extending interface for backward compatibility
+interface ToolDefinition {
+  name: string;
+  description: string;
+  input_schema: {
+    type: string;
+    properties: Record<string, unknown>;
+    required?: string[];
+  };
+}
 
 interface FirecrawlSearchResult {
   success?: boolean;

@@ -1,4 +1,4 @@
-import { AzureOpenAI } from '@azure/openai';
+import OpenAI from 'openai';
 import { 
   AIClient, 
   AIClientOptions, 
@@ -9,7 +9,7 @@ import {
 } from './ai-client-interface';
 
 export class AzureOpenAIClient extends AIClient {
-  private client: AzureOpenAI | null = null;
+  private client: OpenAI | null = null;
 
   constructor(
     private endpoint: string,
@@ -19,15 +19,20 @@ export class AzureOpenAIClient extends AIClient {
     super();
   }
 
-  private getClient(): AzureOpenAI {
+  private getClient(): OpenAI {
     if (!this.client) {
       if (!this.endpoint || !this.apiKey || !this.deploymentName) {
         throw new Error('Azure OpenAI configuration is incomplete. Please set AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_KEY, and AZURE_OPENAI_DEPLOYMENT_NAME');
       }
-      this.client = new AzureOpenAI({
-        endpoint: this.endpoint,
+      
+      // Configure OpenAI client for Azure
+      this.client = new OpenAI({
         apiKey: this.apiKey,
-        apiVersion: "2024-02-15-preview", // Use latest API version
+        baseURL: `${this.endpoint}/openai/deployments/${this.deploymentName}`,
+        defaultQuery: { 'api-version': '2024-02-15-preview' },
+        defaultHeaders: {
+          'api-key': this.apiKey,
+        },
       });
     }
     return this.client;
@@ -84,7 +89,7 @@ export class AzureOpenAIClient extends AIClient {
 
     try {
       const response = await client.chat.completions.create({
-        model: this.deploymentName,
+        model: this.deploymentName, // For Azure, this should be the deployment name
         messages: messages,
         max_tokens: options.max_tokens || 8000,
         tools: tools,

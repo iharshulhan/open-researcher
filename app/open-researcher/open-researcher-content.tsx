@@ -22,14 +22,20 @@ export default function OpenResearcherContent() {
   const [firecrawlApiKey, setFirecrawlApiKey] = useState('')
   const [isValidatingApiKey, setIsValidatingApiKey] = useState(false)
   const [hasFirecrawlKey, setHasFirecrawlKey] = useState(false)
+  const [aiProvider, setAiProvider] = useState<{ type: string; name: string } | null>(null)
 
   useEffect(() => {
-    // Check for Firecrawl API key on mount
+    // Check for API keys and provider info on mount
     fetch('/api/check-env')
       .then(res => res.json())
       .then(data => {
         const hasEnvFirecrawlKey = data.environmentStatus.FIRECRAWL_API_KEY
         setHasFirecrawlKey(hasEnvFirecrawlKey)
+        
+        // Set AI provider info
+        if (data.currentProvider) {
+          setAiProvider(data.currentProvider)
+        }
 
         // Check localStorage for saved key if not in env
         if (!hasEnvFirecrawlKey) {
@@ -102,20 +108,28 @@ export default function OpenResearcherContent() {
                 className="w-[113px] h-auto"
               />
             </Link>
-            <Button
-              variant="code"
-              asChild
-            >
-              <Link
-                href="https://github.com/mendableai/open-researcher"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center gap-2"
+            <div className="flex items-center gap-3">
+              {aiProvider && (
+                <div className="flex items-center gap-1 px-2 py-1 bg-green-50 text-green-700 text-xs rounded-md border border-green-200">
+                  <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+                  <span>AI: {aiProvider.name}</span>
+                </div>
+              )}
+              <Button
+                variant="code"
+                asChild
               >
-                <Github className="h-4 w-4" />
-                Use this template
-              </Link>
-            </Button>
+                <Link
+                  href="https://github.com/mendableai/open-researcher"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-2"
+                >
+                  <Github className="h-4 w-4" />
+                  Use this template
+                </Link>
+              </Button>
+            </div>
           </div>
         </div>
       </header>

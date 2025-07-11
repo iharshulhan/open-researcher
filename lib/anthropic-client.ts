@@ -3,8 +3,7 @@ import {
   AIClient, 
   AIClientOptions, 
   AIResponse, 
-  AIStreamingCallback,
-  AIClientMessage
+  AIStreamingCallback
 } from './ai-client-interface';
 
 export class AnthropicClient extends AIClient {
