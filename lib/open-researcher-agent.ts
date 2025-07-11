@@ -5,6 +5,11 @@ import { AIClient } from './ai-client-interface';
 // Lazy initialization for Vercel deployment  
 let firecrawl: FirecrawlApp | null = null;
 
+// Query deduplication to prevent infinite loops
+const recentQueries = new Map<string, { timestamp: number; count: number }>();
+const QUERY_COOLDOWN = 30000; // 30 seconds between same queries
+const MAX_SAME_QUERY = 2; // Maximum times same query can be executed
+
 function getAIClient(): AIClient {
   return AIClientFactory.getClient();
 }
@@ -167,6 +172,35 @@ const tools: ToolDefinition[] = [
 // Execute Firecrawl search with two-step approach
 async function executeWebSearch(query: string, limit: number = 5, scrapeContent: boolean = false, tbs?: string): Promise<{ content: string; screenshots: Array<{ url: string; screenshot?: string }> }> {
   // Performing firecrawl search
+  console.log(`[TOOL] executeWebSearch called with query: "${query}", limit: ${limit}, scrapeContent: ${scrapeContent}, tbs: ${tbs}`);
+  
+  // Query deduplication check
+  const queryKey = `${query}_${limit}_${scrapeContent}_${tbs || ''}`;
+  const now = Date.now();
+  const recent = recentQueries.get(queryKey);
+  
+  if (recent) {
+    const timeSinceLastQuery = now - recent.timestamp;
+    if (timeSinceLastQuery < QUERY_COOLDOWN) {
+      console.log(`[TOOL] Query deduplication: Same query executed ${recent.count} times recently. Time since last: ${timeSinceLastQuery}ms`);
+      if (recent.count >= MAX_SAME_QUERY) {
+        return {
+          content: `Query "${query}" has been executed ${recent.count} times recently. To prevent infinite loops, please try a different search query or wait ${Math.ceil((QUERY_COOLDOWN - timeSinceLastQuery) / 1000)} seconds.`,
+          screenshots: []
+        };
+      }
+    } else {
+      // Reset count if enough time has passed
+      recentQueries.set(queryKey, { timestamp: now, count: 1 });
+    }
+  } else {
+    recentQueries.set(queryKey, { timestamp: now, count: 1 });
+  }
+  
+  // Update count for existing recent query
+  if (recent && now - recent.timestamp < QUERY_COOLDOWN) {
+    recentQueries.set(queryKey, { timestamp: now, count: recent.count + 1 });
+  }
   
   const screenshots: Array<{ url: string; screenshot?: string }> = [];
   
@@ -185,7 +219,23 @@ async function executeWebSearch(query: string, limit: number = 5, scrapeContent:
 
     const metadataResults = await getFirecrawlClient().search(query, searchOptions) as FirecrawlSearchResult;
     
+    console.log(`[TOOL] Search completed. Success: ${metadataResults.success !== false}, Results: ${metadataResults.data?.length || 0}, Error: ${metadataResults.error || 'none'}`);
+    
     if (!metadataResults.data || metadataResults.data.length === 0) {
+      if (metadataResults.error) {
+        console.log(`[TOOL] Search failed with error: ${metadataResults.error}`);
+        // Check for rate limit specifically
+        const isRateLimit = metadataResults.error.includes('429') || 
+                           metadataResults.error.toLowerCase().includes('rate limit') || 
+                           metadataResults.error.toLowerCase().includes('too many requests');
+        if (isRateLimit) {
+          return { 
+            content: `Error performing search: Rate limit exceeded (HTTP 429). The search service is temporarily unavailable. Please wait a few minutes before trying again.`, 
+            screenshots: [] 
+          };
+        }
+        return { content: `Error performing search: ${metadataResults.error}`, screenshots: [] };
+      }
       return { content: "No search results found.", screenshots: [] };
     }
 
@@ -381,8 +431,25 @@ async function executeWebSearch(query: string, limit: number = 5, scrapeContent:
     return { content: output, screenshots };
   } catch (error) {
     // Search error occurred
+    console.log(`[TOOL] Search error occurred:`, error);
+    
+    // Enhanced rate limit detection
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    const isRateLimit = errorMessage.includes('429') || 
+                       errorMessage.toLowerCase().includes('rate limit') ||
+                       errorMessage.toLowerCase().includes('too many requests') ||
+                       errorMessage.toLowerCase().includes('quota') ||
+                       errorMessage.toLowerCase().includes('limit exceeded');
+    
+    if (isRateLimit) {
+      return { 
+        content: `Error performing search: Rate limit exceeded (HTTP 429). The search service is temporarily unavailable. Please wait a few minutes before trying again.`,
+        screenshots: []
+      };
+    }
+    
     return { 
-      content: `Error performing search: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      content: `Error performing search: ${errorMessage}`,
       screenshots: []
     };
   }
@@ -618,27 +685,36 @@ async function executeDeepScrape(
 
 // Execute tool based on name
 export async function executeTool(toolName: string, input: Record<string, unknown>): Promise<{ content: string; screenshots?: Array<{ url: string; screenshot?: string }> }> {
+  console.log(`[TOOL] executeTool called: ${toolName} with input:`, JSON.stringify(input, null, 2));
+  
+  let result;
   switch (toolName) {
     case 'web_search':
-      return await executeWebSearch(
+      result = await executeWebSearch(
         input.query as string, 
         (input.limit as number) || 5, 
         (input.scrape_content as boolean) || false,
         input.tbs as string | undefined
       );
+      break;
     case 'deep_scrape':
-      return await executeDeepScrape(
+      result = await executeDeepScrape(
         input.source_url as string,
         input.link_filter as string | undefined,
         (input.max_depth as number) || 1,
         (input.max_links as number) || 5,
         (input.formats as string[]) || ['markdown']
       );
+      break;
     case 'analyze_content':
-      return { content: await analyzeContent(input.content as string, input.analysis_type as string, input.context as string | undefined) };
+      result = { content: await analyzeContent(input.content as string, input.analysis_type as string, input.context as string | undefined) };
+      break;
     default:
-      return { content: `Unknown tool: ${toolName}` };
+      result = { content: `Unknown tool: ${toolName}` };
   }
+  
+  console.log(`[TOOL] executeTool result for ${toolName}: ${result.content.substring(0, 200)}...`);
+  return result;
 }
 
 // Streaming version with callback
@@ -671,6 +747,12 @@ export async function performResearchWithStreaming(
    - Then scrape that specific post to get its content
 
 3. Important: When someone asks for the "5th blog post", they mean the 5th post when counting from the newest (top) down, NOT a post with "5" in the title.
+
+4. CRITICAL - Avoid infinite loops:
+   - If a search query fails due to rate limiting (HTTP 429), DO NOT retry the same query
+   - If you get an error message about repeating queries, try a different approach or stop
+   - If you cannot find information after 2-3 different search attempts, summarize what you found and explain the limitation
+   - Always vary your search terms if the first attempt doesn't work
 
 Be thorough and methodical. Always verify you have the correct post by its position in the blog listing.`;
 
@@ -848,8 +930,18 @@ async function performAnthropicStreamingResearch(
         const duration = Date.now() - startTime;
         
         // Check if the tool execution failed
-        const isError = toolResult.content.startsWith('Error performing');
-        const isRateLimit = toolResult.content.includes('429') || toolResult.content.includes('rate limit') || toolResult.content.includes('Rate limit');
+        const isError = toolResult.content.startsWith('Error performing') || toolResult.content.includes('Query deduplication');
+        const isRateLimit = toolResult.content.includes('429') || 
+                           toolResult.content.includes('rate limit') || 
+                           toolResult.content.includes('Rate limit') ||
+                           toolResult.content.includes('too many requests') ||
+                           toolResult.content.includes('quota') ||
+                           toolResult.content.includes('limit exceeded');
+        const isDeduplication = toolResult.content.includes('Query deduplication') || 
+                               toolResult.content.includes('has been executed') ||
+                               toolResult.content.includes('prevent infinite loops');
+        
+        console.log(`[TOOL] Tool result analysis - isError: ${isError}, isRateLimit: ${isRateLimit}, isDeduplication: ${isDeduplication}`);
         
         if (isError) {
           // Track tool failure
@@ -861,20 +953,27 @@ async function performAnthropicStreamingResearch(
           };
           toolFailureTracker.set(toolName, updatedFailures);
           
-          // If it's a rate limit error, add special handling
-          if (isRateLimit) {
-            const rateLimitMessage = `Rate limit reached for ${toolDisplayName}. Taking a break to avoid further rate limiting. The search service is temporarily unavailable.`;
+          console.log(`[TOOL] Tool failure tracked for ${toolName}: ${updatedFailures.consecutiveFailures} consecutive failures`);
+          
+          // If it's a rate limit error or deduplication, end the conversation immediately
+          if (isRateLimit || isDeduplication) {
+            let endMessage = '';
+            if (isRateLimit) {
+              endMessage = `I apologize, but the search service is currently rate limited. Please try again in a few minutes. I received a rate limit error (HTTP 429) when trying to search for "${block.input?.query || 'your query'}".`;
+            } else if (isDeduplication) {
+              endMessage = `I notice I'm repeating the same search query. To avoid infinite loops, I'm stopping here. Please try rephrasing your question or providing more specific search terms.`;
+            }
             
             onEvent({
               type: 'tool_result',
               tool: toolName,
               duration,
-              result: rateLimitMessage,
+              result: endMessage,
               screenshots: toolResult.screenshots || []
             });
 
-            // End the conversation for rate limits
-            finalResponse = `I apologize, but the search service is currently rate limited. Please try again in a few minutes. I've attempted to search for "${block.input?.query || 'your query'}" but received a rate limit error (HTTP 429).`;
+            // End the conversation here
+            finalResponse = endMessage;
             return;
           }
         } else {
@@ -1068,8 +1167,18 @@ async function performSimpleStreamingResearch(
         const duration = Date.now() - startTime;
         
         // Check if the tool execution failed
-        const isError = toolResult.content.startsWith('Error performing');
-        const isRateLimit = toolResult.content.includes('429') || toolResult.content.includes('rate limit') || toolResult.content.includes('Rate limit');
+        const isError = toolResult.content.startsWith('Error performing') || toolResult.content.includes('Query deduplication');
+        const isRateLimit = toolResult.content.includes('429') || 
+                           toolResult.content.includes('rate limit') || 
+                           toolResult.content.includes('Rate limit') ||
+                           toolResult.content.includes('too many requests') ||
+                           toolResult.content.includes('quota') ||
+                           toolResult.content.includes('limit exceeded');
+        const isDeduplication = toolResult.content.includes('Query deduplication') || 
+                               toolResult.content.includes('has been executed') ||
+                               toolResult.content.includes('prevent infinite loops');
+        
+        console.log(`[TOOL] Azure OpenAI tool result analysis - isError: ${isError}, isRateLimit: ${isRateLimit}, isDeduplication: ${isDeduplication}`);
         
         if (isError) {
           // Track tool failure
@@ -1081,38 +1190,28 @@ async function performSimpleStreamingResearch(
           };
           toolFailureTracker.set(toolName, updatedFailures);
           
-          // If it's a rate limit error, add special handling
-          if (isRateLimit) {
-            const rateLimitMessage = `Rate limit reached for ${toolDisplayName}. Taking a break to avoid further rate limiting. The search service is temporarily unavailable.`;
+          console.log(`[TOOL] Azure OpenAI tool failure tracked for ${toolName}: ${updatedFailures.consecutiveFailures} consecutive failures`);
+          
+          // If it's a rate limit error or deduplication, add special handling
+          if (isRateLimit || isDeduplication) {
+            let endMessage = '';
+            if (isRateLimit) {
+              endMessage = `I apologize, but the search service is currently rate limited. Please try again in a few minutes. I received a rate limit error (HTTP 429) when trying to search for "${block.input?.query || 'your query'}".`;
+            } else if (isDeduplication) {
+              endMessage = `I notice I'm repeating the same search query. To avoid infinite loops, I'm stopping here. Please try rephrasing your question or providing more specific search terms.`;
+            }
             
             onEvent({
               type: 'tool_result',
               tool: toolName,
               duration,
-              result: rateLimitMessage,
+              result: endMessage,
               screenshots: toolResult.screenshots || []
             });
-
-            // Add rate limit message to conversation
-            currentMessages = [
-              ...currentMessages,
-              {
-                role: "assistant",
-                content: response.content
-              },
-              {
-                role: "user",
-                content: [{
-                  type: "tool_result",
-                  tool_use_id: block.id,
-                  content: rateLimitMessage
-                }]
-              }
-            ];
             
-            // Force end the conversation for rate limits
+            // Force end the conversation for rate limits or deduplication
             hasToolCalls = false;
-            finalResponse = `I apologize, but the search service is currently rate limited. Please try again in a few minutes. I've attempted to search for "${block.input?.query || 'your query'}" but received a rate limit error (HTTP 429).`;
+            finalResponse = endMessage;
             break;
           }
         } else {
@@ -1202,6 +1301,12 @@ export async function performResearch(query: string): Promise<string> {
    - Then scrape that specific post to get its content
 
 3. Important: When someone asks for the "5th blog post", they mean the 5th post when counting from the newest (top) down, NOT a post with "5" in the title.
+
+4. CRITICAL - Avoid infinite loops:
+   - If a search query fails due to rate limiting (HTTP 429), DO NOT retry the same query
+   - If you get an error message about repeating queries, try a different approach or stop
+   - If you cannot find information after 2-3 different search attempts, summarize what you found and explain the limitation
+   - Always vary your search terms if the first attempt doesn't work
 
 Be thorough and methodical. Always verify you have the correct post by its position in the blog listing.`;
 
