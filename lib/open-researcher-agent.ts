@@ -762,8 +762,23 @@ async function performAnthropicStreamingResearch(
   let currentMessages = [...requestParams.messages];
   let finalResponse = '';
 
+  // Track tool failures to prevent infinite loops
+  const toolFailureTracker = new Map<string, { count: number; lastFailureTime: number; consecutiveFailures: number }>();
+  const maxConsecutiveFailures = 3;
+  const rateLimitCooldown = 60000; // 1 minute cooldown for rate limit errors
+  const maxRecursionDepth = 15; // Prevent infinite recursion
+  let currentDepth = 0;
+
   // Process response recursively
   async function processResponse(resp: { content: Array<{ type: string; thinking?: string; text?: string; name?: string; input?: Record<string, unknown>; id?: string }> }) {
+    currentDepth++;
+    
+    if (currentDepth > maxRecursionDepth) {
+      // Prevent infinite recursion
+      finalResponse = `Research stopped to prevent infinite loop. Maximum conversation depth (${maxRecursionDepth}) reached.`;
+      return;
+    }
+
     for (const block of resp.content) {
       if (block.type === 'thinking') {
         thinkingCount++;
@@ -779,9 +794,43 @@ async function performAnthropicStreamingResearch(
         assistantContent.push(block);
       } else if (block.type === 'tool_use') {
         toolCallCount++;
-        const toolDisplayName = block.name === 'web_search' ? 'firecrawl_search' : 
-                                 block.name === 'deep_scrape' ? 'firecrawl_scrape' : 
-                                 block.name;
+        const toolName = block.name || '';
+        const toolDisplayName = toolName === 'web_search' ? 'firecrawl_search' : 
+                                 toolName === 'deep_scrape' ? 'firecrawl_scrape' : 
+                                 toolName;
+        
+        // Check if this tool has failed too many times recently
+        const failureInfo = toolFailureTracker.get(toolName);
+        if (failureInfo && failureInfo.consecutiveFailures >= maxConsecutiveFailures) {
+          // Check if enough time has passed since last failure (for rate limits)
+          const timeSinceLastFailure = Date.now() - failureInfo.lastFailureTime;
+          if (timeSinceLastFailure < rateLimitCooldown) {
+            // Skip this tool call and provide a helpful message
+            const errorMessage = `Tool "${toolDisplayName}" has failed ${failureInfo.consecutiveFailures} times consecutively. Stopping to prevent infinite loop. Please wait ${Math.ceil((rateLimitCooldown - timeSinceLastFailure) / 1000)} seconds before retrying.`;
+            
+            onEvent({
+              type: 'tool_call',
+              number: toolCallCount,
+              tool: toolDisplayName,
+              parameters: block.input
+            });
+
+            onEvent({
+              type: 'tool_result',
+              tool: toolName,
+              duration: 0,
+              result: errorMessage,
+              screenshots: []
+            });
+
+            // End the conversation here
+            finalResponse = errorMessage;
+            return;
+          } else {
+            // Reset failure count after cooldown period
+            toolFailureTracker.set(toolName, { count: 0, lastFailureTime: 0, consecutiveFailures: 0 });
+          }
+        }
         
         // Send tool call event
         onEvent({
@@ -795,13 +844,51 @@ async function performAnthropicStreamingResearch(
 
         // Execute the tool
         const startTime = Date.now();
-        const toolResult = await executeTool(block.name || '', block.input || {});
+        const toolResult = await executeTool(toolName, block.input || {});
         const duration = Date.now() - startTime;
+        
+        // Check if the tool execution failed
+        const isError = toolResult.content.startsWith('Error performing');
+        const isRateLimit = toolResult.content.includes('429') || toolResult.content.includes('rate limit') || toolResult.content.includes('Rate limit');
+        
+        if (isError) {
+          // Track tool failure
+          const currentFailures = toolFailureTracker.get(toolName) || { count: 0, lastFailureTime: 0, consecutiveFailures: 0 };
+          const updatedFailures = {
+            count: currentFailures.count + 1,
+            lastFailureTime: Date.now(),
+            consecutiveFailures: currentFailures.consecutiveFailures + 1
+          };
+          toolFailureTracker.set(toolName, updatedFailures);
+          
+          // If it's a rate limit error, add special handling
+          if (isRateLimit) {
+            const rateLimitMessage = `Rate limit reached for ${toolDisplayName}. Taking a break to avoid further rate limiting. The search service is temporarily unavailable.`;
+            
+            onEvent({
+              type: 'tool_result',
+              tool: toolName,
+              duration,
+              result: rateLimitMessage,
+              screenshots: toolResult.screenshots || []
+            });
+
+            // End the conversation for rate limits
+            finalResponse = `I apologize, but the search service is currently rate limited. Please try again in a few minutes. I've attempted to search for "${block.input?.query || 'your query'}" but received a rate limit error (HTTP 429).`;
+            return;
+          }
+        } else {
+          // Reset consecutive failures on success
+          const currentFailures = toolFailureTracker.get(toolName);
+          if (currentFailures) {
+            toolFailureTracker.set(toolName, { ...currentFailures, consecutiveFailures: 0 });
+          }
+        }
         
         // Send tool result event with screenshots if available
         onEvent({
           type: 'tool_result',
-          tool: block.name || '',
+          tool: toolName,
           duration,
           result: toolResult.content,
           screenshots: toolResult.screenshots
@@ -893,6 +980,11 @@ async function performSimpleStreamingResearch(
   let maxIterations = 10; // Prevent infinite loops
   let iteration = 0;
 
+  // Track tool failures to prevent infinite loops
+  const toolFailureTracker = new Map<string, { count: number; lastFailureTime: number; consecutiveFailures: number }>();
+  const maxConsecutiveFailures = 3;
+  const rateLimitCooldown = 60000; // 1 minute cooldown for rate limit errors
+
   while (iteration < maxIterations) {
     iteration++;
     
@@ -910,9 +1002,57 @@ async function performSimpleStreamingResearch(
         hasToolCalls = true;
         toolCallCount++;
         
-        const toolDisplayName = block.name === 'web_search' ? 'firecrawl_search' : 
-                                 block.name === 'deep_scrape' ? 'firecrawl_scrape' : 
-                                 block.name;
+        const toolName = block.name || '';
+        const toolDisplayName = toolName === 'web_search' ? 'firecrawl_search' : 
+                                 toolName === 'deep_scrape' ? 'firecrawl_scrape' : 
+                                 toolName;
+        
+        // Check if this tool has failed too many times recently
+        const failureInfo = toolFailureTracker.get(toolName);
+        if (failureInfo && failureInfo.consecutiveFailures >= maxConsecutiveFailures) {
+          // Check if enough time has passed since last failure (for rate limits)
+          const timeSinceLastFailure = Date.now() - failureInfo.lastFailureTime;
+          if (timeSinceLastFailure < rateLimitCooldown) {
+            // Skip this tool call and provide a helpful message
+            const errorMessage = `Tool "${toolDisplayName}" has failed ${failureInfo.consecutiveFailures} times consecutively. Stopping to prevent infinite loop. Please wait ${Math.ceil((rateLimitCooldown - timeSinceLastFailure) / 1000)} seconds before retrying.`;
+            
+            onEvent({
+              type: 'tool_call',
+              number: toolCallCount,
+              tool: toolDisplayName,
+              parameters: block.input
+            });
+
+            onEvent({
+              type: 'tool_result',
+              tool: toolName,
+              duration: 0,
+              result: errorMessage,
+              screenshots: []
+            });
+
+            // Add error message to conversation and continue without making tool call
+            currentMessages = [
+              ...currentMessages,
+              {
+                role: "assistant",
+                content: response.content
+              },
+              {
+                role: "user",
+                content: [{
+                  type: "tool_result",
+                  tool_use_id: block.id,
+                  content: errorMessage
+                }]
+              }
+            ];
+            continue;
+          } else {
+            // Reset failure count after cooldown period
+            toolFailureTracker.set(toolName, { count: 0, lastFailureTime: 0, consecutiveFailures: 0 });
+          }
+        }
         
         // Send tool call event
         onEvent({
@@ -924,13 +1064,69 @@ async function performSimpleStreamingResearch(
 
         // Execute the tool
         const startTime = Date.now();
-        const toolResult = await executeTool(block.name || '', block.input || {});
+        const toolResult = await executeTool(toolName, block.input || {});
         const duration = Date.now() - startTime;
+        
+        // Check if the tool execution failed
+        const isError = toolResult.content.startsWith('Error performing');
+        const isRateLimit = toolResult.content.includes('429') || toolResult.content.includes('rate limit') || toolResult.content.includes('Rate limit');
+        
+        if (isError) {
+          // Track tool failure
+          const currentFailures = toolFailureTracker.get(toolName) || { count: 0, lastFailureTime: 0, consecutiveFailures: 0 };
+          const updatedFailures = {
+            count: currentFailures.count + 1,
+            lastFailureTime: Date.now(),
+            consecutiveFailures: currentFailures.consecutiveFailures + 1
+          };
+          toolFailureTracker.set(toolName, updatedFailures);
+          
+          // If it's a rate limit error, add special handling
+          if (isRateLimit) {
+            const rateLimitMessage = `Rate limit reached for ${toolDisplayName}. Taking a break to avoid further rate limiting. The search service is temporarily unavailable.`;
+            
+            onEvent({
+              type: 'tool_result',
+              tool: toolName,
+              duration,
+              result: rateLimitMessage,
+              screenshots: toolResult.screenshots || []
+            });
+
+            // Add rate limit message to conversation
+            currentMessages = [
+              ...currentMessages,
+              {
+                role: "assistant",
+                content: response.content
+              },
+              {
+                role: "user",
+                content: [{
+                  type: "tool_result",
+                  tool_use_id: block.id,
+                  content: rateLimitMessage
+                }]
+              }
+            ];
+            
+            // Force end the conversation for rate limits
+            hasToolCalls = false;
+            finalResponse = `I apologize, but the search service is currently rate limited. Please try again in a few minutes. I've attempted to search for "${block.input?.query || 'your query'}" but received a rate limit error (HTTP 429).`;
+            break;
+          }
+        } else {
+          // Reset consecutive failures on success
+          const currentFailures = toolFailureTracker.get(toolName);
+          if (currentFailures) {
+            toolFailureTracker.set(toolName, { ...currentFailures, consecutiveFailures: 0 });
+          }
+        }
         
         // Send tool result event with screenshots if available
         onEvent({
           type: 'tool_result',
-          tool: block.name || '',
+          tool: toolName,
           duration,
           result: toolResult.content,
           screenshots: toolResult.screenshots
@@ -1073,8 +1269,23 @@ async function performAnthropicResearch(requestParams: any): Promise<string> {
   let currentMessages = [...requestParams.messages];
   let finalResponse = '';
 
+  // Track tool failures to prevent infinite loops
+  const toolFailureTracker = new Map<string, { count: number; lastFailureTime: number; consecutiveFailures: number }>();
+  const maxConsecutiveFailures = 3;
+  const rateLimitCooldown = 60000; // 1 minute cooldown for rate limit errors
+  const maxRecursionDepth = 15; // Prevent infinite recursion
+  let currentDepth = 0;
+
   // Process response recursively
   async function processResponse(resp: { content: Array<{ type: string; thinking?: string; text?: string; name?: string; input?: Record<string, unknown>; id?: string }> }) {
+    currentDepth++;
+    
+    if (currentDepth > maxRecursionDepth) {
+      // Prevent infinite recursion
+      finalResponse = `Research stopped to prevent infinite loop. Maximum conversation depth (${maxRecursionDepth}) reached.`;
+      return;
+    }
+
     for (const block of resp.content) {
       if (block.type === 'thinking') {
         thinkingCount++;
@@ -1082,12 +1293,57 @@ async function performAnthropicResearch(requestParams: any): Promise<string> {
         assistantContent.push(block);
       } else if (block.type === 'tool_use') {
         toolCallCount++;
+        const toolName = block.name || '';
+        
+        // Check if this tool has failed too many times recently
+        const failureInfo = toolFailureTracker.get(toolName);
+        if (failureInfo && failureInfo.consecutiveFailures >= maxConsecutiveFailures) {
+          // Check if enough time has passed since last failure (for rate limits)
+          const timeSinceLastFailure = Date.now() - failureInfo.lastFailureTime;
+          if (timeSinceLastFailure < rateLimitCooldown) {
+            // Skip this tool call and provide a helpful message
+            const errorMessage = `Tool "${toolName}" has failed ${failureInfo.consecutiveFailures} times consecutively. Stopping to prevent infinite loop. Please wait ${Math.ceil((rateLimitCooldown - timeSinceLastFailure) / 1000)} seconds before retrying.`;
+            finalResponse = errorMessage;
+            return;
+          } else {
+            // Reset failure count after cooldown period
+            toolFailureTracker.set(toolName, { count: 0, lastFailureTime: 0, consecutiveFailures: 0 });
+          }
+        }
+        
         assistantContent.push(block);
 
         // Execute the tool
         const startTime = Date.now();
-        const toolResult = await executeTool(block.name || '', block.input || {});
+        const toolResult = await executeTool(toolName, block.input || {});
         const duration = Date.now() - startTime;
+        
+        // Check if the tool execution failed
+        const isError = toolResult.content.startsWith('Error performing');
+        const isRateLimit = toolResult.content.includes('429') || toolResult.content.includes('rate limit') || toolResult.content.includes('Rate limit');
+        
+        if (isError) {
+          // Track tool failure
+          const currentFailures = toolFailureTracker.get(toolName) || { count: 0, lastFailureTime: 0, consecutiveFailures: 0 };
+          const updatedFailures = {
+            count: currentFailures.count + 1,
+            lastFailureTime: Date.now(),
+            consecutiveFailures: currentFailures.consecutiveFailures + 1
+          };
+          toolFailureTracker.set(toolName, updatedFailures);
+          
+          // If it's a rate limit error, stop immediately
+          if (isRateLimit) {
+            finalResponse = `I apologize, but the search service is currently rate limited. Please try again in a few minutes. I've attempted to search for "${block.input?.query || 'your query'}" but received a rate limit error (HTTP 429).`;
+            return;
+          }
+        } else {
+          // Reset consecutive failures on success
+          const currentFailures = toolFailureTracker.get(toolName);
+          if (currentFailures) {
+            toolFailureTracker.set(toolName, { ...currentFailures, consecutiveFailures: 0 });
+          }
+        }
 
         // Update messages with tool result
         currentMessages = [
@@ -1151,6 +1407,11 @@ async function performSimpleResearch(
   let maxIterations = 10; // Prevent infinite loops
   let iteration = 0;
 
+  // Track tool failures to prevent infinite loops
+  const toolFailureTracker = new Map<string, { count: number; lastFailureTime: number; consecutiveFailures: number }>();
+  const maxConsecutiveFailures = 3;
+  const rateLimitCooldown = 60000; // 1 minute cooldown for rate limit errors
+
   while (iteration < maxIterations) {
     iteration++;
     
@@ -1166,9 +1427,73 @@ async function performSimpleResearch(
     for (const block of response.content) {
       if (block.type === 'tool_use') {
         hasToolCalls = true;
+        const toolName = block.name || '';
+
+        // Check if this tool has failed too many times recently
+        const failureInfo = toolFailureTracker.get(toolName);
+        if (failureInfo && failureInfo.consecutiveFailures >= maxConsecutiveFailures) {
+          // Check if enough time has passed since last failure (for rate limits)
+          const timeSinceLastFailure = Date.now() - failureInfo.lastFailureTime;
+          if (timeSinceLastFailure < rateLimitCooldown) {
+            // Skip this tool call and provide a helpful message
+            const errorMessage = `Tool "${toolName}" has failed ${failureInfo.consecutiveFailures} times consecutively. Stopping to prevent infinite loop. Please wait ${Math.ceil((rateLimitCooldown - timeSinceLastFailure) / 1000)} seconds before retrying.`;
+            
+            // Add error message to conversation and stop
+            currentMessages = [
+              ...currentMessages,
+              {
+                role: "assistant",
+                content: response.content
+              },
+              {
+                role: "user",
+                content: [{
+                  type: "tool_result",
+                  tool_use_id: block.id,
+                  content: errorMessage
+                }]
+              }
+            ];
+            finalResponse = errorMessage;
+            hasToolCalls = false;
+            break;
+          } else {
+            // Reset failure count after cooldown period
+            toolFailureTracker.set(toolName, { count: 0, lastFailureTime: 0, consecutiveFailures: 0 });
+          }
+        }
 
         // Execute the tool
-        const toolResult = await executeTool(block.name || '', block.input || {});
+        const toolResult = await executeTool(toolName, block.input || {});
+        
+        // Check if the tool execution failed
+        const isError = toolResult.content.startsWith('Error performing');
+        const isRateLimit = toolResult.content.includes('429') || toolResult.content.includes('rate limit') || toolResult.content.includes('Rate limit');
+        
+        if (isError) {
+          // Track tool failure
+          const currentFailures = toolFailureTracker.get(toolName) || { count: 0, lastFailureTime: 0, consecutiveFailures: 0 };
+          const updatedFailures = {
+            count: currentFailures.count + 1,
+            lastFailureTime: Date.now(),
+            consecutiveFailures: currentFailures.consecutiveFailures + 1
+          };
+          toolFailureTracker.set(toolName, updatedFailures);
+          
+          // If it's a rate limit error, stop immediately
+          if (isRateLimit) {
+            const rateLimitMessage = `Rate limit reached for ${toolName}. Taking a break to avoid further rate limiting. The search service is temporarily unavailable.`;
+            finalResponse = `I apologize, but the search service is currently rate limited. Please try again in a few minutes. I've attempted to search for "${block.input?.query || 'your query'}" but received a rate limit error (HTTP 429).`;
+            hasToolCalls = false;
+            break;
+          }
+        } else {
+          // Reset consecutive failures on success
+          const currentFailures = toolFailureTracker.get(toolName);
+          if (currentFailures) {
+            toolFailureTracker.set(toolName, { ...currentFailures, consecutiveFailures: 0 });
+          }
+        }
 
         // Update messages for next iteration
         currentMessages = [
