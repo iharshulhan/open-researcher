@@ -17,8 +17,17 @@ A powerful AI-powered research tool that combines Firecrawl's web scraping capab
 ## Prerequisites
 
 - Node.js 18+ and npm
-- API Keys (at least one required):
-  - `ANTHROPIC_API_KEY` - For AI functionality
+- API Keys (at least one AI provider required):
+  
+  **Option 1: Anthropic Claude (default)**
+  - `ANTHROPIC_API_KEY` - For Claude AI functionality
+  
+  **Option 2: Azure OpenAI (alternative)**
+  - `AZURE_OPENAI_ENDPOINT` - Your Azure OpenAI resource endpoint
+  - `AZURE_OPENAI_API_KEY` - Your Azure OpenAI API key
+  - `AZURE_OPENAI_DEPLOYMENT_NAME` - Your model deployment name
+  
+  **Web Scraping:**
   - `FIRECRAWL_API_KEY` - For web scraping (can be added via UI)
 
 ## Quick Start
@@ -39,9 +48,21 @@ A powerful AI-powered research tool that combines Firecrawl's web scraping capab
    cp .env.local.example .env.local
    ```
    
-   Edit `.env.local` and add your API keys:
+   Edit `.env.local` and configure your preferred AI provider:
+   
+   **Option A: Anthropic Claude**
    ```
    ANTHROPIC_API_KEY=your_anthropic_api_key
+   AI_PROVIDER=anthropic
+   FIRECRAWL_API_KEY=your_firecrawl_api_key  # Optional, can be added via UI
+   ```
+   
+   **Option B: Azure OpenAI**
+   ```
+   AZURE_OPENAI_ENDPOINT=https://your-resource-name.openai.azure.com/
+   AZURE_OPENAI_API_KEY=your_azure_openai_api_key
+   AZURE_OPENAI_DEPLOYMENT_NAME=your_deployment_name
+   AI_PROVIDER=azure
    FIRECRAWL_API_KEY=your_firecrawl_api_key  # Optional, can be added via UI
    ```
 
@@ -57,14 +78,28 @@ A powerful AI-powered research tool that combines Firecrawl's web scraping capab
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `ANTHROPIC_API_KEY` | Yes | Claude API key for AI functionality |
-| `FIRECRAWL_API_KEY` | No* | Firecrawl API key for web scraping |
+| **AI Provider (choose one)** | | |
+| `ANTHROPIC_API_KEY` | Option A | Claude API key for AI functionality |
+| `AZURE_OPENAI_ENDPOINT` | Option B | Azure OpenAI resource endpoint |
+| `AZURE_OPENAI_API_KEY` | Option B | Azure OpenAI API key |
+| `AZURE_OPENAI_DEPLOYMENT_NAME` | Option B | Azure OpenAI model deployment name |
+| `AI_PROVIDER` | No* | Preferred provider: 'anthropic' or 'azure' |
+| **Web Scraping** | | |
+| `FIRECRAWL_API_KEY` | No** | Firecrawl API key for web scraping |
 
-*Can be provided through the UI if not set in environment variables
+*Auto-detected based on available API keys if not set  
+**Can be provided through the UI if not set in environment variables
 
 ## Getting API Keys
 
+### AI Providers
 - **Anthropic API Key**: Visit [Anthropic Console](https://console.anthropic.com/)
+- **Azure OpenAI**: 
+  1. Create an Azure OpenAI resource in [Azure Portal](https://portal.azure.com/)
+  2. Deploy a model (e.g., GPT-4) 
+  3. Get your endpoint, API key, and deployment name from the resource
+
+### Web Scraping
 - **Firecrawl API Key**: Visit [Firecrawl](https://www.firecrawl.dev/)
 
 ## Usage
@@ -110,7 +145,9 @@ npm run lint
 - **Next.js 15** - React framework
 - **TypeScript** - Type safety
 - **Tailwind CSS** - Styling
-- **Anthropic Claude** - AI model
+- **AI Providers:**
+  - **Anthropic Claude** - Advanced reasoning and thinking
+  - **Azure OpenAI** - GPT-4 and other OpenAI models
 - **Firecrawl** - Web scraping
 - **Radix UI** - UI components
 
@@ -129,5 +166,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 ## Acknowledgments
 
 - Built with [Firecrawl](https://www.firecrawl.dev/) for powerful web scraping
-- Powered by [Anthropic's Claude](https://www.anthropic.com/) for AI capabilities
+- AI powered by:
+  - [Anthropic's Claude](https://www.anthropic.com/) for advanced reasoning
+  - [Azure OpenAI](https://azure.microsoft.com/en-us/products/ai-services/openai-service) for GPT models
 - UI components from [Radix UI](https://www.radix-ui.com/) and [shadcn/ui](https://ui.shadcn.com/)
